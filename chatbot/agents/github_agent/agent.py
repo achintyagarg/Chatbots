@@ -37,7 +37,7 @@ from google.genai import types  # noqa: E402
 
 from plugins import ObservabilityPlugin, SafetyPlugin  # noqa: E402
 
-from .prompts import STATIC_INSTRUCTION, build_instruction  # noqa: E402
+from .prompts import STATIC_INSTRUCTION  # noqa: E402
 from .skills import load_skills  # noqa: E402
 from .tools.corpus import corpus_stats, search_corpus  # noqa: E402
 from .tools.github_write import WRITE_TOOLS  # noqa: E402
@@ -94,9 +94,10 @@ corpus_tools = [FunctionTool(search_corpus), FunctionTool(corpus_stats)]
 skill_tools, skill_instructions = load_skills()
 
 
-def _instruction() -> str:
-    """Dynamic prompt half plus whatever fragments the skills contributed."""
-    return "\n\n".join([build_instruction(), *skill_instructions])
+# Skill guidance is standing instruction, not per-turn context, so it belongs
+# in the static (system) prompt. Putting it in `instruction` would append it as
+# a user message after the user's question -- see the note in prompts.py.
+STATIC_TEXT = "\n\n".join([STATIC_INSTRUCTION, *skill_instructions])
 
 
 root_agent = LlmAgent(
@@ -110,9 +111,12 @@ root_agent = LlmAgent(
     # Split deliberately: the static half is a stable, cacheable prefix; the
     # dynamic half carries per-session state. See prompts.py.
     static_instruction=types.Content(
-        role="user", parts=[types.Part(text=STATIC_INSTRUCTION)]
+        role="user", parts=[types.Part(text=STATIC_TEXT)]
     ),
-    instruction=_instruction(),
+    # MUST stay empty. A non-empty `instruction` alongside `static_instruction`
+    # is appended as a user message *after* the user's question, and the model
+    # answers that instead. See the note at the bottom of prompts.py.
+    instruction="",
     tools=[
         github_toolset,
         *corpus_tools,
@@ -149,11 +153,20 @@ app = App(
     root_agent=root_agent,
     # Registered once here, so they apply to every agent, tool and model call.
     plugins=[SafetyPlugin(), ObservabilityPlugin()],
-    context_cache_config=ContextCacheConfig(
-        # Gemini enforces a hard 4096-token floor, so anything lower is a no-op.
-        min_tokens=4096,
-        ttl_seconds=600,
-        cache_intervals=5,
+    # Off by default: the Gemini free tier allows zero cached-content storage
+    # (limit=0), so enabling this there fails on every single turn with a 429.
+    # The request still succeeds -- caching degrades gracefully -- but it logs
+    # an error each time and buys nothing. Turn it on with a paid key, where
+    # it does cut cost and latency on the ~3.5k-token static prefix.
+    context_cache_config=(
+        ContextCacheConfig(
+            # Gemini enforces a hard 4096-token floor; lower values are no-ops.
+            min_tokens=4096,
+            ttl_seconds=600,
+            cache_intervals=5,
+        )
+        if os.getenv("ENABLE_CONTEXT_CACHE", "").lower() in ("1", "true", "yes")
+        else None
     ),
     events_compaction_config=EventsCompactionConfig(
         # Summarize every 10 invocations, keeping 2 of overlap so the boundary

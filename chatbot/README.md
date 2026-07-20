@@ -129,15 +129,36 @@ non-allowlisted repos before any human is asked.
 
 ### Context engineering — `prompts.py`, `agent.py`
 
-The prompt is split by volatility. `static_instruction` holds the persona,
-grounding rules, and safety policy — a stable prefix that context caching can
-reuse. `instruction` holds the small per-session remainder with `{state?}`
-templating. One interpolated value at the top of the static block would
-invalidate the cache every single turn.
+All standing guidance — persona, grounding rules, safety policy, skill
+fragments — lives in `static_instruction`, and **`instruction` is deliberately
+empty**.
 
-`ContextCacheConfig(min_tokens=4096, …)` — note Gemini enforces a hard
-4096-token floor, so lower values are silently no-ops.
+That is not a style choice, and getting it wrong breaks the agent completely
+while every individual piece still looks correct. When both are set, ADK does
+not put `instruction` in the system prompt; it appends it to `contents` as a
+*user message after the user's question*
+(`flows/llm_flows/instructions.py`). Standing guidance placed there becomes the
+most recent message in the conversation, so the model answers **it** instead of
+you — replying "I understand the instructions, I am ready to assist!" and never
+calling a tool.
+
+An `InstructionProvider` returning `""` does not rescue this: the callable is
+truthy, so ADK appends an empty user turn instead. The branch is only skipped
+when `instruction` is falsy.
+
+To add per-session context later, don't reintroduce `instruction`. Either drop
+`static_instruction` (then `instruction` becomes the system prompt and supports
+`{key?}` state templating), or inject from a `before_model_callback` where you
+control the position. `tests/test_prompt_wiring.py` guards the invariant and
+fails if it regresses.
+
 `EventsCompactionConfig` summarizes long conversations instead of overflowing.
+Context caching is **opt-in** via `ENABLE_CONTEXT_CACHE=1`: the Gemini free
+tier permits zero cached-content storage, so enabling it there 429s on every
+turn — harmlessly, since caching degrades gracefully, but noisily and for no
+benefit. Worth turning on with a paid key, where the ~3.5k-token static prefix
+is exactly what you want cached. Note Gemini also enforces a hard 4096-token
+floor on `min_tokens`, so lower values are silently no-ops.
 
 Retrieved chunks enter as **tool output, never as appended system prompt**, which
 keeps provenance attached and the cacheable prefix stable.
@@ -211,7 +232,7 @@ ingestion/               loaders -> chunking -> embed -> Chroma store, + CLI
 plugins/                 safety and observability, registered on the App
 server/                  FastAPI app and vanilla-JS frontend
 corpus/                  sample documents (fictional, so grounding is provable)
-tests/                   85 tests, mostly chunker and safety boundary
+tests/                   90 tests: chunker, loaders, safety, prompt wiring
 ```
 
 ---
@@ -222,9 +243,9 @@ tests/                   85 tests, mostly chunker and safety boundary
 python -m pytest
 ```
 
-85 tests covering chunk boundary preservation, overlap, id stability, loader
-structure recovery, and the safety boundary (untrusted-data wrapping, write
-policy, redaction, injection screening).
+90 tests covering chunk boundary preservation, overlap, id stability, loader
+structure recovery, the safety boundary (untrusted-data wrapping, write policy,
+redaction, injection screening), and the prompt-wiring invariant above.
 
 For the end-to-end behaviour that unit tests can't cover — does it actually
 retrieve before answering, does it actually pause — use the table in

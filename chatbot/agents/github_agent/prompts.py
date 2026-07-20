@@ -47,6 +47,9 @@ Rules that apply to every factual answer:
    grounded one.
 4. If a tool fails or returns nothing, report that rather than falling back to
    memory.
+5. If the user names a repository as a URL or an "owner/repo" string, use it
+   directly -- that is the repository they mean, so go straight to the tools.
+   Only ask which repository they mean when none has been named at all.
 
 # Untrusted content
 
@@ -84,20 +87,30 @@ inline. Be concise; the user can ask for detail.
 """.strip()
 
 
-def build_instruction() -> str:
-    """
-    The dynamic half of the prompt.
-
-    ADK's ``{key?}`` syntax reads from session state and renders empty when the
-    key is absent, so a fresh session with no state set does not blow up.
-    """
-    return """
-# Current context
-
-Default repository (used when the user does not name one): {default_repo?}
-Repositories you may write to: {write_allowlist?}
-User preferences for this session: {user_preferences?}
-
-If the user asks about "this repo" or "the repo" and no default repository is
-set above, ask which repository they mean instead of guessing.
-""".strip()
+# ---------------------------------------------------------------------------
+# Why the agent sets `instruction=""` and puts everything above.
+#
+# When BOTH `static_instruction` and `instruction` are set, ADK does NOT put
+# `instruction` in the system prompt. It appends it to `contents` as a *user
+# message, after the user's actual question*:
+#
+#     elif agent.instruction and agent.static_instruction:
+#         dynamic_content = types.Content(role='user', parts=[...])
+#         llm_request.contents.append(dynamic_content)
+#                          -- google/adk/flows/llm_flows/instructions.py
+#
+# That placement is meant for genuinely volatile context that benefits from
+# recency. But if `instruction` holds standing guidance, that guidance becomes
+# the most recent message in the conversation, so the model answers *it*
+# instead of the user -- responding "I understand the instructions, I am ready
+# to assist!" and never calling a tool.
+#
+# An InstructionProvider that returns "" does not help: `agent.instruction` is
+# a function and therefore truthy, so ADK still appends an empty user turn.
+# The branch is only skipped when `instruction` is falsy. Hence "".
+#
+# To add per-session context later, do NOT reintroduce `instruction` here.
+# Either drop `static_instruction` (then `instruction` becomes the system
+# prompt and supports `{key?}` state templating), or inject the context from a
+# `before_model_callback` where you control the position.
+# ---------------------------------------------------------------------------
