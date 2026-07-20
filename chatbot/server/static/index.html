@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Grounded GitHub Assistant</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Grounded GitHub Assistant</h1>
+      <div class="status" id="status">connecting…</div>
+    </header>
+
+    <main>
+      <section class="chat" aria-label="Conversation">
+        <div id="messages" class="messages">
+          <div class="empty">
+            <p>Ask about a GitHub repository, or about documents you've ingested.</p>
+            <ul>
+              <li>“How many open issues does google/adk-python have right now?”</li>
+              <li>“What does the spec say about retry behaviour?”</li>
+              <li>“Open an issue on my repo about the flaky test.”</li>
+            </ul>
+            <p class="hint">
+              Live repo questions hit the GitHub MCP tools. Document questions hit
+              the corpus. Writes pause for your approval.
+            </p>
+          </div>
+        </div>
+
+        <form id="composer" class="composer">
+          <textarea
+            id="input"
+            rows="1"
+            placeholder="Ask a question…  (Enter to send, Shift+Enter for newline)"
+            autocomplete="off"
+          ></textarea>
+          <button type="submit" id="send">Send</button>
+        </form>
+      </section>
+
+      <aside class="sidebar">
+        <div class="panel">
+          <h2>Tool calls</h2>
+          <p class="panel-hint">
+            Proof of grounding: every retrieval the agent made, in order.
+          </p>
+          <div id="trace" class="trace">
+            <div class="muted">No tool calls yet.</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Corpus</h2>
+          <div id="corpus" class="corpus muted">loading…</div>
+          <label class="drop" id="drop">
+            <input type="file" id="file" accept=".pdf,.md,.markdown,.txt" hidden />
+            <span>Drop a PDF, Markdown or text file to index it</span>
+          </label>
+          <div id="upload-status" class="upload-status"></div>
+        </div>
+      </aside>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

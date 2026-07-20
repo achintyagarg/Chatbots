@@ -1,0 +1,23 @@
+google-adk[mcp]>=2.3.0
+google-genai>=2.10.0
+python-dotenv>=1.0.0
+
+# Retrieval corpus.
+# chromadb pulls OpenTelemetry >=1.44, but google-adk 2.3.0 pins otel <=1.42.1.
+# Installing chromadb unpinned silently breaks adk -- keep these three together.
+chromadb>=1.5.0
+opentelemetry-api==1.42.1
+opentelemetry-sdk==1.42.1
+opentelemetry-semantic-conventions==0.63b1
+opentelemetry-exporter-otlp-proto-grpc==1.42.1
+
+# PDF skill / ingestion
+pypdf>=5.0.0
+
+# Server
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9
+
+# Tests
+pytest>=8.0.0

@@ -1,0 +1,16 @@
+# Secrets -- never commit
+.env
+
+# Local retrieval index (rebuild with `python -m ingestion.cli ingest ./corpus`)
+.chroma/
+
+# Persisted sessions / pending approvals
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
