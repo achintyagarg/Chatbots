@@ -17,12 +17,46 @@ const CONFIRM_TOOL = "adk_request_confirmation";
 
 const state = {
   appName: null,
+  collection: "corpus",
+  agents: [],
   userId: "web-user",
   sessionId: null,
   busy: false,
 };
 
+/* Per-agent copy for the empty state, so switching agents re-teaches usage. */
+const AGENT_HINTS = {
+  github_agent: {
+    title: "Grounded GitHub Assistant",
+    intro: "Ask about a GitHub repository, or about documents you've ingested.",
+    examples: [
+      "“How many open issues does google/adk-python have right now?”",
+      "“What does the spec say about retry behaviour?”",
+      "“Open an issue on my repo about the flaky test.”",
+    ],
+    hint:
+      "Live repo questions hit the GitHub MCP tools. Document questions hit " +
+      "the corpus. Writes pause for your approval.",
+  },
+  finance_agent: {
+    title: "Finance Research Assistant",
+    intro:
+      "Ask about markets, stocks, or your own research notes. Data and " +
+      "analysis only — never buy/sell advice.",
+    examples: [
+      "“Is the market down today?”",
+      "“What's NVDA's P/E and the tone of its recent news?”",
+      "“Add NVDA to my watchlist.”",
+    ],
+    hint:
+      "Market numbers come from live tool calls (Yahoo quotes are ~15 min " +
+      "delayed). Watchlist changes pause for your approval.",
+  },
+};
+
 const el = {
+  title: document.getElementById("title"),
+  picker: document.getElementById("agent-picker"),
   status: document.getElementById("status"),
   messages: document.getElementById("messages"),
   composer: document.getElementById("composer"),
@@ -40,19 +74,80 @@ const el = {
 async function init() {
   try {
     const config = await fetchJSON("/api/config");
-    state.appName = config.agent_name;
+    state.agents = config.agents;
 
+    el.picker.innerHTML = "";
+    for (const agent of state.agents) {
+      const option = document.createElement("option");
+      option.value = agent.name;
+      option.textContent = agent.label || agent.name;
+      el.picker.appendChild(option);
+    }
+    el.picker.value = config.default_agent;
+    el.picker.addEventListener("change", () => selectAgent(el.picker.value));
+
+    await selectAgent(config.default_agent);
+  } catch (err) {
+    setStatus(`startup failed: ${err.message}`, "error");
+  }
+}
+
+/* Switching agents means a new session: sessions belong to one app, and
+ * carrying one agent's pending approvals into another would be incoherent. */
+async function selectAgent(name) {
+  const agent = state.agents.find((a) => a.name === name);
+  state.appName = name;
+  state.collection = agent?.collection || "corpus";
+
+  el.messages.innerHTML = "";
+  el.trace.innerHTML = '<div class="muted">No tool calls yet.</div>';
+  renderEmptyState(name, agent);
+  setStatus("starting session…");
+
+  try {
     const session = await fetchJSON(
       `/apps/${state.appName}/users/${state.userId}/sessions`,
       { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
     );
     state.sessionId = session.id;
-
     setStatus(`session ${session.id.slice(0, 8)}`, "ready");
-    refreshCorpus();
   } catch (err) {
-    setStatus(`startup failed: ${err.message}`, "error");
+    setStatus(`session failed: ${err.message}`, "error");
   }
+  refreshCorpus();
+}
+
+function renderEmptyState(name, agent) {
+  const copy = AGENT_HINTS[name] || {
+    title: agent?.label || name,
+    intro: "Ask a question.",
+    examples: [],
+    hint: "",
+  };
+  el.title.textContent = copy.title;
+  document.title = copy.title;
+
+  const empty = document.createElement("div");
+  empty.className = "empty";
+  const intro = document.createElement("p");
+  intro.textContent = copy.intro;
+  empty.appendChild(intro);
+  if (copy.examples.length) {
+    const list = document.createElement("ul");
+    for (const example of copy.examples) {
+      const item = document.createElement("li");
+      item.textContent = example;
+      list.appendChild(item);
+    }
+    empty.appendChild(list);
+  }
+  if (copy.hint) {
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = copy.hint;
+    empty.appendChild(hint);
+  }
+  el.messages.appendChild(empty);
 }
 
 async function fetchJSON(url, options) {
@@ -378,7 +473,9 @@ function addTrace(name, detail, kind) {
 
 async function refreshCorpus() {
   try {
-    const stats = await fetchJSON("/api/corpus/stats");
+    const stats = await fetchJSON(
+      `/api/corpus/stats?collection=${encodeURIComponent(state.collection)}`
+    );
     el.corpus.className = "corpus";
     if (!stats.chunks) {
       el.corpus.innerHTML =
@@ -427,6 +524,7 @@ async function upload(file) {
 
   const form = new FormData();
   form.append("file", file);
+  form.append("collection", state.collection);
 
   try {
     const result = await fetchJSON("/api/ingest", { method: "POST", body: form });

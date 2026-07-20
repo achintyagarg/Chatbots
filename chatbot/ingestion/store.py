@@ -24,15 +24,26 @@ COLLECTION_NAME = "corpus"
 
 
 class CorpusStore:
-    def __init__(self, path: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        collection: str = COLLECTION_NAME,
+    ):
+        """
+        One store instance per collection. Collections isolate agents from each
+        other: the GitHub agent's Zarnex spec must never surface in a finance
+        query and vice versa -- cross-domain hits would not error, they would
+        just quietly degrade retrieval for both agents.
+        """
         self.path = Path(path or os.getenv("CHROMA_PATH") or DEFAULT_PATH)
+        self.collection_name = collection
         self.path.mkdir(parents=True, exist_ok=True)
         self._client = chromadb.PersistentClient(
             path=str(self.path),
             settings=Settings(anonymized_telemetry=False),
         )
         self._collection = self._client.get_or_create_collection(
-            name=COLLECTION_NAME,
+            name=collection,
             # Embeddings are normalized in embed.py, so cosine is the right
             # metric and equivalent to inner product here.
             metadata={"hnsw:space": "cosine"},
@@ -119,19 +130,19 @@ class CorpusStore:
         }
 
     def reset(self) -> None:
-        self._client.delete_collection(COLLECTION_NAME)
+        self._client.delete_collection(self.collection_name)
         self._collection = self._client.get_or_create_collection(
-            name=COLLECTION_NAME,
+            name=self.collection_name,
             metadata={"hnsw:space": "cosine"},
         )
 
 
-_store: CorpusStore | None = None
+_stores: dict[str, CorpusStore] = {}
 
 
-def get_store() -> CorpusStore:
-    """Process-wide singleton; Chroma clients are not cheap to rebuild."""
-    global _store
-    if _store is None:
-        _store = CorpusStore()
-    return _store
+def get_store(collection: str = COLLECTION_NAME) -> CorpusStore:
+    """Process-wide cache, one store per collection; Chroma clients are not
+    cheap to rebuild and all collections share one on-disk client path."""
+    if collection not in _stores:
+        _stores[collection] = CorpusStore(collection=collection)
+    return _stores[collection]

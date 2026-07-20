@@ -7,6 +7,9 @@
 # Persisted sessions / pending approvals
 *.db
 
+# User data: watchlist and cached price history
+data/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -85,6 +85,9 @@ github_toolset = McpToolset(
     ],
 )
 
+# Server lifespan closes these on shutdown; every agent module exports the list.
+mcp_toolsets = [github_toolset]
+
 
 # --- Grounding source 2: the local document corpus -----------------------
 corpus_tools = [FunctionTool(search_corpus), FunctionTool(corpus_stats)]

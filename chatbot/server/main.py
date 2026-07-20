@@ -26,7 +26,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from dotenv import load_dotenv  # noqa: E402
-from fastapi import FastAPI, File, HTTPException, UploadFile  # noqa: E402
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile  # noqa: E402
 from fastapi.responses import RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from google.adk.cli.fast_api import get_fast_api_app  # noqa: E402
@@ -46,27 +46,42 @@ logger = logging.getLogger(__name__)
 
 AGENTS_DIR = PROJECT_ROOT / "agents"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-AGENT_NAME = "github_agent"
+
+# Which Chroma collection each agent reads. The frontend uses this to route
+# uploads to the active agent's corpus; /api/ingest validates against it so a
+# typo cannot silently create an orphan collection no agent ever reads.
+AGENTS = {
+    "github_agent": {
+        "collection": "corpus",
+        "label": "GitHub assistant",
+    },
+    "finance_agent": {
+        "collection": "finance",
+        "label": "Finance research",
+    },
+}
 
 
 @contextlib.asynccontextmanager
 async def lifespan(_: FastAPI):
     """
-    Close the MCP session on shutdown.
+    Close every agent's MCP sessions on shutdown.
 
-    The toolset holds a long-lived HTTP session to GitHub's MCP server. Without
-    this the process leaks it on every reload, which under `--reload` means a
-    growing pile of half-open connections.
+    Toolsets hold long-lived connections (HTTP to remote MCP servers, pipes to
+    stdio ones). Without this the process leaks them on every reload, which
+    under `--reload` means a growing pile of half-open connections. Each agent
+    module exports `mcp_toolsets` for exactly this hook.
     """
     yield
-    try:
-        sys.path.insert(0, str(AGENTS_DIR))
-        from github_agent.agent import github_toolset
-
-        await github_toolset.close()
-        logger.info("Closed GitHub MCP toolset.")
-    except Exception:  # noqa: BLE001 - shutdown must not raise
-        logger.exception("Failed to close MCP toolset cleanly")
+    sys.path.insert(0, str(AGENTS_DIR))
+    for agent_name in AGENTS:
+        try:
+            module = __import__(f"{agent_name}.agent", fromlist=["mcp_toolsets"])
+            for toolset in getattr(module, "mcp_toolsets", []):
+                await toolset.close()
+            logger.info("Closed MCP toolsets for %s.", agent_name)
+        except Exception:  # noqa: BLE001 - shutdown must not raise
+            logger.exception("Failed to close MCP toolsets for %s", agent_name)
 
 
 app: FastAPI = get_fast_api_app(
@@ -81,14 +96,24 @@ app: FastAPI = get_fast_api_app(
 # --- Corpus routes -------------------------------------------------------
 
 
+def _validate_collection(collection: str) -> str:
+    known = {cfg["collection"] for cfg in AGENTS.values()}
+    if collection not in known:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown collection '{collection}'. Known: {', '.join(sorted(known))}",
+        )
+    return collection
+
+
 @app.get("/api/corpus/stats")
-async def corpus_stats():
-    """What is currently indexed."""
-    return get_store().stats()
+async def corpus_stats(collection: str = "corpus"):
+    """What is currently indexed in one collection."""
+    return get_store(_validate_collection(collection)).stats()
 
 
 @app.post("/api/ingest")
-async def ingest(file: UploadFile = File(...)):
+async def ingest(file: UploadFile = File(...), collection: str = Form("corpus")):
     """
     Upload one document straight into the corpus.
 
@@ -97,6 +122,7 @@ async def ingest(file: UploadFile = File(...)):
     one. Divergence between the two paths would make retrieval quality depend
     on how a document happened to arrive.
     """
+    collection = _validate_collection(collection)
     filename = Path(file.filename or "").name
     suffix = Path(filename).suffix.lower()
 
@@ -133,7 +159,7 @@ async def ingest(file: UploadFile = File(...)):
         )
 
     try:
-        store = get_store()
+        store = get_store(collection)
         store.delete_source(document.source)
         embeddings = embed_documents([c.embed_text for c in chunks])
         indexed = store.upsert_chunks(chunks, embeddings)
@@ -141,19 +167,25 @@ async def ingest(file: UploadFile = File(...)):
         logger.exception("Ingest indexing failed for %s", filename)
         raise HTTPException(status_code=500, detail=f"Indexing failed: {exc}") from exc
 
-    logger.info("Ingested %s -> %d chunks", filename, indexed)
+    logger.info("Ingested %s -> %d chunks (collection=%s)", filename, indexed, collection)
     return {
         "status": "ok",
         "filename": filename,
         "title": document.title,
         "chunks_indexed": indexed,
+        "collection": collection,
     }
 
 
 @app.get("/api/config")
 async def config():
-    """Lets the frontend discover the agent name instead of hardcoding it."""
-    return {"agent_name": AGENT_NAME}
+    """Agent roster for the frontend: names, labels, and corpus collections."""
+    return {
+        "agents": [
+            {"name": name, **cfg} for name, cfg in AGENTS.items()
+        ],
+        "default_agent": "github_agent",
+    }
 
 
 # --- Frontend ------------------------------------------------------------

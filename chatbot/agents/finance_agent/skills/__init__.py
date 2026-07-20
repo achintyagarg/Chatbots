@@ -1,4 +1,4 @@
-"""GitHub agent skills. See skills_registry.py at the project root."""
+"""Finance agent skills. See skills_registry.py at the project root."""
 
 from __future__ import annotations
 

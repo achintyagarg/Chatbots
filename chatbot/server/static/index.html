@@ -3,30 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Grounded GitHub Assistant</title>
+    <title>Grounded Assistants</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <header>
-      <h1>Grounded GitHub Assistant</h1>
+      <h1 id="title">Grounded Assistant</h1>
+      <select id="agent-picker" class="agent-picker" aria-label="Agent"></select>
       <div class="status" id="status">connecting…</div>
     </header>
 
     <main>
       <section class="chat" aria-label="Conversation">
         <div id="messages" class="messages">
-          <div class="empty">
-            <p>Ask about a GitHub repository, or about documents you've ingested.</p>
-            <ul>
-              <li>“How many open issues does google/adk-python have right now?”</li>
-              <li>“What does the spec say about retry behaviour?”</li>
-              <li>“Open an issue on my repo about the flaky test.”</li>
-            </ul>
-            <p class="hint">
-              Live repo questions hit the GitHub MCP tools. Document questions hit
-              the corpus. Writes pause for your approval.
-            </p>
-          </div>
+          <div class="empty" id="empty-hint"></div>
         </div>
 
         <form id="composer" class="composer">

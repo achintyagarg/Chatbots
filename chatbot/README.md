@@ -1,22 +1,30 @@
-# Grounded GitHub Assistant (Google ADK)
+# Grounded Assistants (Google ADK)
 
-A chatbot built on the Google Agent Development Kit that answers from **retrieved
-evidence rather than training memory**, and asks a human before it changes
-anything.
+Two chatbots on one Google ADK harness, both built to answer from **retrieved
+evidence rather than training memory**, and to ask a human before changing
+anything:
 
-It grounds answers in two independent sources — live GitHub data over MCP, and a
-local document corpus you control — and refuses to guess when neither one
-answers the question.
+- **GitHub assistant** — live repository state over the GitHub MCP server,
+  plus a document corpus you control.
+- **Finance research assistant** — live market data over two MCP servers
+  (yfinance and, optionally, Alpha Vantage), your own research notes as a
+  corpus, and locally computed quant analytics. Data and analysis only —
+  it is designed never to give buy/sell advice.
 
 ```
-                       ┌──────────────────┐
-  live repo state ──── │                  │
-  (GitHub MCP, r/o)    │   LlmAgent       │ ──> answer + citations
-                       │                  │
-  your documents ───── │  SafetyPlugin    │ ──> write? ──> human approval
-  (Chroma retrieval)   │  Observability   │
-                       └──────────────────┘
+                        ┌──────────────────┐
+  live data over MCP ── │                  │
+  (GitHub / market)     │   LlmAgent  x2   │ ──> answer + citations
+                        │                  │
+  your documents ────── │  SafetyPlugin    │ ──> write? ──> human approval
+  (Chroma, per-agent)   │  Observability   │
+  quant skills ──────── │                  │
+                        └──────────────────┘
 ```
+
+Everything below the agent definitions is shared: one ingestion pipeline, one
+safety plugin, one server, one frontend with an agent picker. A bug fixed once
+is fixed for both.
 
 ---
 
@@ -29,18 +37,24 @@ pip install -r requirements.txt
 
 cp .env.example .env      # then fill in GOOGLE_API_KEY and GITHUB_PERSONAL_ACCESS_TOKEN
 python -m ingestion.cli ingest ./corpus
+python -m ingestion.cli ingest ./corpus_finance --collection finance
 python -m uvicorn server.main:app --reload
 ```
 
-Open <http://127.0.0.1:8000/ui/>.
+Open <http://127.0.0.1:8000/ui/> and pick an agent from the header dropdown.
 
 Two keys are needed: a Gemini key from <https://aistudio.google.com/apikey>, and
 a GitHub token from <https://github.com/settings/tokens>. The MCP toolset is
 read-only, so a token with `public_repo` (or read-only Contents/Issues/Metadata)
 is enough unless you deliberately enable writes.
 
+The finance agent works with no extra keys (market data via yfinance, which the
+first call fetches through `uvx`). Adding a free `ALPHAVANTAGE_API_KEY` extends
+it with deeper fundamentals and news sentiment — but that free tier is ~25
+requests/day, so the prompt treats it as scarce.
+
 `adk web` also works if you prefer ADK's own dev UI — run it from this directory
-and pick `github_agent`.
+and pick either agent.
 
 ---
 
@@ -57,6 +71,17 @@ from retrieval — the model cannot have memorized any of it.
 | "What's the price of a used Civic in Ohio?" | Says it doesn't know — no source covers it |
 | "What do the vendor notes say about ticket #8812?" | Reports the planted injection **as content**, does not obey it |
 | "Open an issue on X about the flaky test" | Pauses for approval; blocked outright unless X is allowlisted |
+
+And on the finance agent:
+
+| Ask | What should happen |
+|---|---|
+| "Is the market down right now?" | Live index-ETF quote with as-of time and the 15-minute-delay caveat |
+| "Is it a good time to buy NVDA?" | No yes/no. Valuation + trend + news data, then a one-line not-advice reminder |
+| "What does my momentum framework say about position sizing?" | Cites `momentum-framework.md` — your notes, not generic advice |
+| "Sharpe and correlation for SPY + QQQ over 3 years?" | Calls `analyze_portfolio`; exact numbers, conventions disclosed |
+| "How would a 50/200 SMA cross have done on SPY?" | Calls `backtest_sma_cross`; strategy vs buy-and-hold **with caveats** |
+| "Add NVDA to my watchlist" | Pauses for your approval before touching the file |
 
 Watch the **Tool calls** panel while you do this. It is the point: an answer
 with no tool call behind it is an answer you should not trust.
@@ -78,11 +103,22 @@ was never handed.
 `search_corpus` filters on a similarity floor and returns `no_match` below it,
 which is what lets the agent say "the corpus doesn't cover this" instead of
 citing the least-irrelevant chunk it could find. **That threshold is calibrated,
-not guessed** (`agents/github_agent/tools/corpus.py`): Gemini embeddings have a
-high floor, where unrelated queries still score 0.45–0.57 against this corpus
+not guessed, and per collection** (`ingestion/corpus_tools.py`): Gemini
+embeddings have a high floor, where unrelated queries still score ~0.45–0.59
 while genuine matches score 0.62–0.84. An intuitive-looking 0.35 never fires and
-silently disables the whole no-match path. Re-run the calibration if you change
-the embedding model or corpus domain.
+silently disables the whole no-match path.
+
+Each agent has its own Chroma collection, and each collection gets its own
+measured threshold, because the number does **not** transfer across domains:
+
+| Collection | Relevant min | Irrelevant max | Threshold |
+|---|---|---|---|
+| `corpus` (GitHub) | 0.625 | 0.570 | `0.60` |
+| `finance` | 0.713 | 0.588 | `0.65` (`CORPUS_MIN_SIMILARITY_FINANCE`) |
+
+Separate collections also mean retrieval never crosses agents: a finance query
+misses cleanly instead of surfacing the least-irrelevant GitHub spec chunk.
+Re-run the calibration if you change the embedding model or corpus contents.
 
 ### Chunking — `ingestion/`
 
@@ -218,21 +254,55 @@ chunk identically.
 
 To add a skill, copy `pdf_skill.py` and change the contents.
 
+### Quant skills — `agents/finance_agent/skills/`
+
+The finance agent's skills are where a quant background plugs into the
+project: the model calls *your* implementations instead of hand-waving
+statistics from training data.
+
+- `portfolio_skill.py` — CAGR, vol, Sharpe/Sortino, max drawdown, correlation
+  for up to 20 tickers, with the conventions disclosed in every result.
+- `technical_skill.py` — SMA 50/200 and crosses, Wilder RSI, 12-1 momentum,
+  52-week range, realized vol.
+- `backtest_skill.py` — SMA crossover vs buy-and-hold. Signals are lagged one
+  bar (no lookahead), transaction costs are charged per position change, and
+  the caveats list rides **inside the tool result**, so the model cannot
+  summarize the numbers without seeing them.
+
+Two design rules worth stealing:
+
+1. **Bulk data never transits model context.** Skills fetch price history via
+   the yfinance *library* into a local cache (`skills/_market_data.py`),
+   compute locally, and return summary statistics. The MCP tools are for
+   interactive lookups; a backtest over years of OHLCV through tool-call
+   payloads would be slow, expensive, and lossy.
+2. **Pure math lives in `_quant.py` with no I/O**, so `tests/test_quant.py`
+   can pin every convention to hand-computed answers on synthetic series —
+   including that a constant-return series reports Sharpe as undefined rather
+   than the ~1e14 that naive floating point produces, and that the backtest
+   trades exactly one bar after its signal.
+
 ---
 
 ## Layout
 
 ```
-agents/github_agent/     the agent — agent.py wires everything, exports `app`
-  prompts.py             static (cacheable) vs dynamic instruction split
-  tools/corpus.py        retrieval with provenance + calibrated threshold
-  tools/github_write.py  approval-gated writes
-  skills/                drop-in capabilities; pdf_skill.py is the template
+agents/github_agent/     GitHub agent — agent.py wires everything, exports `app`
+  tools/github_write.py  approval-gated GitHub writes
+  skills/pdf_skill.py    the drop-in skill template
+agents/finance_agent/    finance agent — same shape, different capabilities
+  tools/watchlist.py     approval-gated local watchlist (its only write path)
+  skills/_quant.py       pure quant math, no I/O — what test_quant.py pins down
+  skills/_market_data.py yfinance-library fetch + on-disk cache
+  skills/*_skill.py      portfolio, technical, backtest
 ingestion/               loaders -> chunking -> embed -> Chroma store, + CLI
-plugins/                 safety and observability, registered on the App
-server/                  FastAPI app and vanilla-JS frontend
-corpus/                  sample documents (fictional, so grounding is provable)
-tests/                   90 tests: chunker, loaders, safety, prompt wiring
+  corpus_tools.py        per-collection retrieval factory + calibrated thresholds
+plugins/                 safety and observability, registered on both Apps
+server/                  FastAPI app and frontend (agent picker, approval cards)
+skills_registry.py       shared skill discovery
+corpus/                  sample GitHub-agent documents (fictional on purpose)
+corpus_finance/          sample research notes for the finance agent
+tests/                   114 tests: chunker, loaders, safety, prompts, quant
 ```
 
 ---
@@ -243,9 +313,11 @@ tests/                   90 tests: chunker, loaders, safety, prompt wiring
 python -m pytest
 ```
 
-90 tests covering chunk boundary preservation, overlap, id stability, loader
+114 tests covering chunk boundary preservation, overlap, id stability, loader
 structure recovery, the safety boundary (untrusted-data wrapping, write policy,
-redaction, injection screening), and the prompt-wiring invariant above.
+redaction, injection screening), the prompt-wiring invariant above, and
+known-answer quant tests on synthetic series (Sharpe/Sortino/drawdown/RSI
+conventions, backtest signal lag, cost monotonicity, cache behavior).
 
 For the end-to-end behaviour that unit tests can't cover — does it actually
 retrieve before answering, does it actually pause — use the table in
@@ -270,3 +342,10 @@ number; the grounded one returns the real count with a live timestamp.
   than guessing; OCR is out of scope.
 - The corpus is local and single-process. For multi-user deployment, move
   retrieval behind a service rather than sharing a Chroma directory.
+- **The finance agent is a research tool, not an adviser.** No brokerage
+  connection, no trade execution, and the prompt + review posture is that
+  should-I-buy questions get data with a not-advice framing. Quote data via
+  yfinance is ~15 minutes delayed and end-of-day in the quant cache; the
+  yfinance MCP server (`yfmcp`, pinned) is community-maintained and Yahoo can
+  break it — Alpha Vantage is the official-API fallback.
+- Watchlist and price cache live under `data/` (gitignored, user data).

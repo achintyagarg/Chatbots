@@ -2,10 +2,14 @@
 Corpus ingestion CLI.
 
     python -m ingestion.cli ingest ./corpus
-    python -m ingestion.cli ingest ./corpus/spec.pdf
-    python -m ingestion.cli stats
+    python -m ingestion.cli ingest ./corpus_finance --collection finance
+    python -m ingestion.cli stats --collection finance
     python -m ingestion.cli inspect --source spec.pdf --limit 3
-    python -m ingestion.cli reset
+    python -m ingestion.cli reset --collection finance
+
+Every command targets one collection (default "corpus", the GitHub agent's).
+The finance agent reads from "finance" -- ingesting into the wrong collection
+does not error, the documents are just invisible to the agent you meant.
 """
 
 from __future__ import annotations
@@ -43,7 +47,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         print(f"Supported: {', '.join(sorted(SUPPORTED_SUFFIXES))}")
         return 0
 
-    store = get_store()
+    store = get_store(args.collection)
     total_chunks = 0
 
     for document in documents:
@@ -65,7 +69,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
-    stats = get_store().stats()
+    stats = get_store(args.collection).stats()
     print(f"Index:     {stats['path']}")
     print(f"Documents: {stats['documents']}")
     print(f"Chunks:    {stats['chunks']}")
@@ -81,7 +85,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     Worth running after every ingest of a new file type: mid-sentence splits
     and empty chunks are obvious to a human eye and invisible in the stats.
     """
-    store = get_store()
+    store = get_store(args.collection)
     where = {"source": args.source} if args.source else None
     got = store._collection.get(  # noqa: SLF001 - debug helper
         where=where, include=["documents", "metadatas"], limit=args.limit
@@ -106,12 +110,16 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 def cmd_reset(args: argparse.Namespace) -> int:
     if not args.yes:
-        confirm = input("Delete the entire corpus index? [y/N] ").strip().lower()
+        confirm = (
+            input(f"Delete the entire {args.collection!r} collection? [y/N] ")
+            .strip()
+            .lower()
+        )
         if confirm != "y":
             print("Aborted.")
             return 0
-    get_store().reset()
-    print("Index cleared.")
+    get_store(args.collection).reset()
+    print(f"Collection {args.collection!r} cleared.")
     return 0
 
 
@@ -135,6 +143,13 @@ def main(argv: list[str] | None = None) -> int:
     p_reset = sub.add_parser("reset", help="delete the entire index")
     p_reset.add_argument("-y", "--yes", action="store_true", help="skip confirmation")
     p_reset.set_defaults(func=cmd_reset)
+
+    for sub_parser in (p_ingest, p_stats, p_inspect, p_reset):
+        sub_parser.add_argument(
+            "--collection",
+            default="corpus",
+            help='target collection (default "corpus"; the finance agent reads "finance")',
+        )
 
     args = parser.parse_args(argv)
     return args.func(args)
